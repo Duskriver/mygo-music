@@ -1,0 +1,44 @@
+Opt-in animation refresh audit for upstream 2af77f5 (v0.1.17)
+
+Virtual-clock probe, no account or native window:
+  CGO_ENABLED=0 go test -tags animationaudit ./internal/app -run '^TestAuditAnimationRefresh$' -count=5 -v
+
+This counts actual view invocations while Tester.Advance runs a second of virtual playback. FramePending alone omits frames scheduled through After, so it is not a total frame counter. The static Draw marker also omits partial repaints; its callback count is diagnostic only.
+
+Reproducible counts, all five runs:
+  Stage, active words:                  60 builds/s
+  Stage, active words, ReduceMotion:    60 builds/s
+  Stage, gap:                          10 builds/s
+  Stage, gap, ReduceMotion:             10 builds/s
+  Stage, paused:                        0 builds/s
+  Normal lyrics, active words:          25 builds/s
+  Normal lyrics, ReduceMotion:          25 builds/s
+
+Optional PNG checks (directory must exist):
+  MYGO_AUDIT_FRAMES=/absolute/output/directory <the test command above>
+The two reduced-stage images show the moving/scaling words at successive playback positions despite ReduceMotion being set.
+
+Native GPU probe, macOS with Go 1.27.3:
+  mkdir -p work/animation-audit-data
+  CGO_ENABLED=0 go build -tags animationaudit,mygo_noinspector -o work/animation-audit ./work-animation-audit
+  MYGO_AUDIT_MODE=stage MYGO_AUDIT_DIR="$PWD/work/animation-audit-data" MYGO_AUDIT_AUDIO="$PWD/internal/player/testdata/seek.mp3" MYGO_AUDIT_LYRICS="$PWD/work-animation-audit/lyrics.json" MYGO_FRAME_STATS=all work/animation-audit
+
+Modes: stage, lyrics, queue, notch, audio. The app uses an isolated local store, a generated lyric fixture, and the repository's MP3 fixture, played muted and repeated. The reported track duration is 200 seconds to give the progress bar a typical track cadence. Stage/lyrics/queue windows are 1200x800 DIPs; notch uses a 528x240 window with the compact notch drawn in it. Foreground windows stay on top to reduce occlusion during the measurement. Quit the diagnostic app to stop it; the installed music app is not used.
+
+For a native frame count, count ALL `mygo: frame ...` log lines in each complete wall-clock second. The framework can repaint just a moving Draw callback; a separate static Draw counter will miss those frames. Record actual view builds separately. Exclude startup and intervals where a supposed foreground rendering comparison stops drawing.
+
+Illustrative valid native samples (Apple M5, macOS arm64, same isolated harness; 4-second warm-up then approximately 12 seconds; CPU 100% = one logical core):
+  Stage:           60 render frames/s, 60 view builds/s, 26.9% CPU
+  Normal lyrics:   24 render frames/s, 24 view builds/s, 10.3% CPU
+  Queue:            6 render frames/s,  7 view builds/s,  8.8% CPU
+  Compact notch:   60 render frames/s,  0 median builds/s,8.3% CPU
+  Audio-only:       0 render frames/s,  0 view builds/s,  6.3% CPU
+The notch already uses partial, paint-only redraws. An experimental Painter.AnimationFrameRate(30) reduced its render count to 30/s but measured 8.1% CPU, a small difference that does not establish a material CPU saving from this short sample.
+
+A separate attempt to replace Stage's Context.AnimationFrame with Context.After(1/30 s) stopped continuous rendering in some trials. Those trials are excluded from CPU-savings claims; that replacement is not proposed here as a production fix.
+
+These are short synthetic workloads with frame-stat logging, not a prediction of every song or a full app CPU profile. The actionable Stage finding is that active words continue moving and rebuilding at display rate under ReduceMotion. Suggested review priorities: respect the preference, count actual timer-driven builds in frame-budget tests, then evaluate reuse of stable word layout and an explicit frame budget with visual checks.
+
+The audit files are behind the `animationaudit` build tag. No product rendering code is changed on this branch.
+
+Validation: the virtual-clock probe passed five runs; CGO_ENABLED=0 go test ./..., go tool mygo vet ., and the tagged native audit build all passed.
