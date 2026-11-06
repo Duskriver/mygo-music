@@ -1,20 +1,27 @@
 package app
 
 import (
+	"bytes"
+	"image"
+	"image/jpeg"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
+
+	"mygo-music/internal/music"
 )
 
 // An animated WebP cover, as some playlists have, shows its first frame,
 // in the bitmap too, which decodes its data again once it drops its pixels.
 func TestAnimatedWebPCover(t *testing.T) {
-	b, err := os.ReadFile("testdata/animated.webp")
+	path, err := filepath.Abs("testdata/animated.webp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	bmp, img, err := decodeArt(b)
+	bmp, img, _, err := loadArt(music.FileURL(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,6 +30,68 @@ func TestAnimatedWebPCover(t *testing.T) {
 	}
 	if w, h := bmp.Size(); w != 24 || h != 24 {
 		t.Errorf("bitmap is %d×%d, want 24×24", w, h)
+	}
+}
+
+// A large cover shown as a thumbnail stays within its decode budget; it used to allocate a full-sized bitmap before shrinking.
+func TestArtThumbnailAllocation(t *testing.T) {
+	url := jpegArtFile(t, 4000)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	bmp, img, _, err := loadArt(sized(url, 96))
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, h := bmp.Size(); w != 96 || h != 96 {
+		t.Fatalf("bitmap is %d×%d, want 96×96", w, h)
+	}
+	if r := img.Bounds(); r.Dx() != 96 || r.Dy() != 96 {
+		t.Errorf("measured image is %v, want 96×96", r)
+	}
+	// The decoded JPEG and the scaler fit comfortably here; another
+	// full-sized decode and its RGBA bitmap do not.
+	const budget = 64 << 20
+	if got := after.TotalAlloc - before.TotalAlloc; got > budget {
+		t.Errorf("loading a 96×96 thumbnail allocated %d bytes, budget %d", got, budget)
+	}
+	runtime.KeepAlive(bmp)
+	runtime.KeepAlive(img)
+}
+
+// jpegArtFile writes a square JPEG cover and returns its file URL.
+func jpegArtFile(t testing.TB, size int) string {
+	t.Helper()
+	var data bytes.Buffer
+	img := image.NewYCbCr(image.Rect(0, 0, size, size), image.YCbCrSubsampleRatio420)
+	if err := jpeg.Encode(&data, img, &jpeg.Options{Quality: 85}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "cover.jpg")
+	if err := os.WriteFile(path, data.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return music.FileURL(path)
+}
+
+// Loading the same 96-pixel thumbnail should not build a full-sized bitmap for a large source.
+func BenchmarkArtThumbnail(b *testing.B) {
+	for _, size := range []int{96, 4000} {
+		b.Run(strconv.Itoa(size), func(b *testing.B) {
+			key := sized(jpegArtFile(b, size), 96)
+			b.ReportAllocs()
+			runtime.GC()
+			b.ResetTimer()
+			for range b.N {
+				bmp, img, _, err := loadArt(key)
+				if err != nil {
+					b.Fatal(err)
+				}
+				runtime.KeepAlive(bmp)
+				runtime.KeepAlive(img)
+			}
+		})
 	}
 }
 
