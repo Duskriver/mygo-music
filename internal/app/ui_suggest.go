@@ -12,6 +12,7 @@ const suggestDelay = 220 * time.Millisecond
 
 // suggestState is what a search may be after, as its query is typed.
 type suggestState struct {
+	gen     uint64   // changes whenever the current request is dismissed
 	query   string   // what they are for
 	items   []string // what the source says it may be after
 	loading bool
@@ -33,11 +34,12 @@ func (a *app) suggest(q string) {
 		return
 	}
 	s.loading = true
+	gen := s.gen
 	s.timer = time.AfterFunc(suggestDelay, func() {
 		items, err := lib.src.Suggest(q)
 		a.post(func() {
-			// Typed on, or searched since.
-			if q != s.query {
+			// Dismissed since, even if the same query was typed again.
+			if gen != s.gen {
 				return
 			}
 			s.timer, s.loading, s.failed = nil, false, err != nil
@@ -51,7 +53,7 @@ func (a *app) dismissSuggestions() {
 	if s.timer != nil {
 		s.timer.Stop()
 	}
-	*s = suggestState{}
+	*s = suggestState{gen: s.gen + 1}
 }
 
 // searchField is the search field atop the sidebar, which suggests what
